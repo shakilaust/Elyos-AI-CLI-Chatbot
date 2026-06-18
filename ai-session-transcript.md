@@ -173,7 +173,36 @@ Ran 15 tests in 0.017s — OK
 
 ---
 
-## Final File State
+### Turn 9 — API discovery documentation and throttled response handling
+
+**User:**
+> Based on the curl results from Task 2 and any surprises found during development, write DISCOVERY.md covering each unexpected API behaviour found, how discovered, and how handled. Then update README.md with install, .env setup, run instructions, two example interactions, and update ai-session-transcript.
+
+**Assistant actions:**
+- Added `DISCOVERY.md` with observed behaviours from manual `curl` probes and development:
+  - Missing API key returns JSON `401`
+  - Missing query parameters return FastAPI-style `422`
+  - Empty weather location returns `404`
+  - Unknown-looking weather locations can still return plausible `200` payloads
+  - Research calls are slow enough to require pending UI
+  - Research rate limiting returns HTTP `200` with `{"status":"throttled",...}` instead of `429`
+  - Anthropic `get_final_message()` must be awaited
+  - Tool result content is serialized with `json.dumps()`
+  - Cancelled tool turns require conversation-history rollback
+- Updated `main.py` to parse API-level error payloads even when HTTP status is `200`.
+- Added a unit test for throttled research responses and confirmed throttled results are not cached.
+- Updated `README.md` with install, `.env`, run instructions, and two examples: weather and research.
+
+**Current verification:**
+
+```
+.venv/bin/python -m unittest -v
+Ran 16 tests — OK
+```
+
+---
+
+## Earlier File Snapshot
 
 ### `main.py` (247 lines)
 
@@ -429,14 +458,14 @@ if __name__ == "__main__":
 
 ---
 
-### `test_main.py` (166 lines)
+### `test_main.py` (180 lines)
 
-15 tests across three classes: `TestGetWeather`, `TestResearchTopic`, `TestToolsSchema`.  
+16 tests across three classes: `TestGetWeather`, `TestResearchTopic`, `TestToolsSchema`.  
 Uses `unittest.IsolatedAsyncioTestCase` — no extra dependencies.
 
 Run with:
 ```bash
-python3 -m unittest test_main -v
+.venv/bin/python -m unittest -v
 ```
 
 ---
@@ -445,11 +474,12 @@ python3 -m unittest test_main -v
 
 ```
 Eloys/
-├── main.py               # 247 lines — all application logic
-├── test_main.py          # 166 lines — 15 unit tests
+├── main.py               # 282 lines — all application logic
+├── test_main.py          # 180 lines — 16 unit tests
 ├── requirements.txt      # anthropic, httpx, python-dotenv
 ├── .env                  # ANTHROPIC_API_KEY (not committed)
 ├── .env.example          # template
+├── DISCOVERY.md          # API behaviours and handling notes
 ├── README.md             # setup guide + sample interactions
 └── ai-session-transcript.md  # this file
 ```
@@ -466,3 +496,4 @@ Eloys/
 | `await stream.get_final_message()` | `text_stream` alone does not expose `stop_reason` or the block list |
 | TTL cache via `time.monotonic()` | Monotonic clock is immune to system clock adjustments; 5-minute TTL |
 | `finally` cancels both tasks | Ensures cleanup even if `except` raises or a non-CancelledError propagates |
+| Parse API-level error payloads | `/research` can rate-limit with HTTP `200`, so status codes alone are insufficient |

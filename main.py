@@ -48,6 +48,37 @@ TOOLS = [
 ]
 
 
+def _api_error_payload(payload: object, context_key: str, context_value: str) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+
+    if payload.get("status") == "throttled":
+        return {
+            "error": payload.get("message", "API request throttled"),
+            "retry_after_seconds": payload.get("retry_after_seconds"),
+            context_key: context_value,
+        }
+
+    if "error" in payload:
+        return {"error": str(payload["error"]), context_key: context_value}
+
+    return None
+
+
+def _http_error_payload(e: httpx.HTTPStatusError, context_key: str, context_value: str) -> dict:
+    try:
+        payload = e.response.json()
+    except Exception:
+        payload = None
+
+    api_error = _api_error_payload(payload, context_key, context_value)
+    if api_error:
+        api_error["status_code"] = e.response.status_code
+        return api_error
+
+    return {"error": f"HTTP {e.response.status_code}", context_key: context_value}
+
+
 async def get_weather(location: str) -> dict:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -57,11 +88,12 @@ async def get_weather(location: str) -> dict:
                 params={"location": location},
             )
             resp.raise_for_status()
-            return resp.json()
+            result = resp.json()
+            return _api_error_payload(result, "location", location) or result
     except httpx.TimeoutException:
         return {"error": "Request timed out", "location": location}
     except httpx.HTTPStatusError as e:
-        return {"error": f"HTTP {e.response.status_code}", "location": location}
+        return _http_error_payload(e, "location", location)
     except Exception as e:
         return {"error": str(e), "location": location}
 
@@ -81,10 +113,13 @@ async def research_topic(topic: str) -> dict:
             )
             resp.raise_for_status()
             result = resp.json()
+            api_error = _api_error_payload(result, "topic", topic)
+            if api_error:
+                return api_error
     except httpx.TimeoutException:
         return {"error": "Request timed out", "topic": topic}
     except httpx.HTTPStatusError as e:
-        return {"error": f"HTTP {e.response.status_code}", "topic": topic}
+        return _http_error_payload(e, "topic", topic)
     except Exception as e:
         return {"error": str(e), "topic": topic}
 

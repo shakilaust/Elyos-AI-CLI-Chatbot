@@ -129,6 +129,20 @@ class TestResearchTopic(unittest.IsolatedAsyncioTestCase):
         self.assertIn("429", result["error"])
         self.assertEqual(result["topic"], "AI safety")
 
+    async def test_throttled_200_returns_error_and_is_not_cached(self):
+        data = {
+            "status": "throttled",
+            "message": "Rate limit exceeded. Please wait.",
+            "retry_after_seconds": 2,
+            "data": None,
+        }
+        with _patch_httpx(_make_response(data)):
+            result = await research_topic("solar energy")
+        self.assertEqual(result["error"], "Rate limit exceeded. Please wait.")
+        self.assertEqual(result["retry_after_seconds"], 2)
+        self.assertEqual(result["topic"], "solar energy")
+        self.assertNotIn("solar energy", main._research_cache)
+
     async def test_error_result_is_not_cached(self):
         with _patch_httpx_exc(httpx.TimeoutException("timed out")):
             await research_topic("fusion energy")
