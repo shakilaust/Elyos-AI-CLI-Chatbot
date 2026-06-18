@@ -70,8 +70,14 @@ You:
 
 ```
 Eloys/
-├── main.py          # All application logic (~247 lines)
-├── requirements.txt # anthropic, httpx, python-dotenv
-├── .env.example     # API key template
-└── README.md
+├── main.py                    # All application logic (247 lines)
+├── test_main.py               # 15 unit tests (no extra dependencies)
+├── requirements.txt           # anthropic, httpx, python-dotenv
+├── .env.example               # API key template
+├── README.md
+└── ai-session-transcript.md   # Full build log with decisions and final code
 ```
+
+## Session transcript
+
+[ai-session-transcript.md](ai-session-transcript.md) documents the complete build session — every feature added, every bug fixed, and the rationale behind non-obvious decisions (history rollback strategy, task cancellation, TTL cache, tool result serialisation).
