@@ -1,63 +1,156 @@
 # Discovery Notes
 
-These notes cover the unexpected API behaviours found while probing the supplied Elyos endpoints and while wiring the tool calls into Claude.
+## 1. Weather API requires `X-API-Key`
 
-## Weather API
+### Behaviour
 
-### Missing API key returns JSON `401`
+The API documentation says both endpoints require `X-API-Key`. I confirmed that the weather endpoint rejects requests without it.
 
-- **Behaviour:** Calling `/weather?location=London` without `X-API-Key` returned `401` with `{"error":"Invalid or missing API key"}`.
-- **How discovered:** Manual `curl` probe without the auth header.
-- **Code handling:** `get_weather()` catches `httpx.HTTPStatusError`, attempts to parse the response JSON, and returns a structured error dict instead of raising.
+Query:
 
-### Missing `location` returns FastAPI-style `422`
+```bash
+curl -i "https://elyos-interview-907656039105.europe-west2.run.app/weather?location=London"
+```
 
-- **Behaviour:** Calling `/weather` without a `location` query parameter returned `422` with a `detail` validation payload.
-- **How discovered:** Manual `curl` probe omitting the query parameter.
-- **Code handling:** The wrapper catches non-2xx statuses and returns an error dict to the LLM so the chat loop can continue.
+Response:
 
-### Empty `location` returns `404`, but unknown locations can return `200`
+```http
+HTTP/2 401
+```
 
-- **Behaviour:** `/weather?location=` returned `404` with `{"error":"Location \"\" not found"}`. However, `/weather?location=Atlantis` returned a plausible weather payload with HTTP `200`.
-- **How discovered:** Manual `curl` probes against empty and obviously fake locations.
-- **Code handling:** The code does not try to validate whether a city is real. It passes successful weather payloads through, but parses JSON error bodies on HTTP failures so the assistant can explain failures cleanly.
+```json
+{"error":"Invalid or missing API key"}
+```
 
-## Research API
+### How I discovered it
 
-### Research is slow by design
+I intentionally called the weather endpoint without the header to check what failure mode the API used.
 
-- **Behaviour:** A normal research request took about 6.5 seconds in manual testing.
-- **How discovered:** Timed `curl` probe against `/research?topic=solar+energy`.
-- **Code handling:** `research_topic()` is run inside an `asyncio.Task`, and the CLI shows a spinner with `Researching {topic}... (Ctrl+C to cancel)` while the API call is pending.
+### How I handled it in code
 
-### Missing `topic` returns FastAPI-style `422`
+`get_weather()` always sends the API key header. If the API still returns an HTTP error, the code catches `httpx.HTTPStatusError`, parses the JSON error body when possible, and returns a structured error dictionary instead of crashing the CLI.
 
-- **Behaviour:** Calling `/research` without a `topic` query parameter returned `422` with a validation payload.
-- **How discovered:** Manual `curl` probe omitting the query parameter.
-- **Code handling:** The wrapper catches the HTTP error and returns a structured error dict instead of crashing the chat loop.
+## 2. Weather API predicts or resolves strange locations
 
-### Rate limiting returns HTTP `200`
+### Behaviour
 
-- **Behaviour:** After several research calls, the API returned HTTP `200` with `{"status":"throttled","message":"Rate limit exceeded. Please wait.","retry_after_seconds":2,"data":null}` instead of using HTTP `429`.
-- **How discovered:** Manual repeated `curl` probes to `/research`.
-- **Code handling:** `_api_error_payload()` detects `status == "throttled"` even on successful HTTP responses, converts it to an error dict, preserves `retry_after_seconds`, and avoids caching the throttled response.
+The weather API does not only return weather for normal city names. It sometimes resolves fake, special, or invalid-looking user input into a real-looking location and returns HTTP `200`.
 
-## Anthropic SDK/tool-use surprises
+I saw this directly in the CLI:
 
-### `get_final_message()` must be awaited
+```text
+You: weather of atlantis
+Assistant: The current weather in Atlantis is:
+- Temperature: 11.3°C
+- Condition: Clear
+- Humidity: 87%
+```
 
-- **Behaviour:** `stream.get_final_message()` returns a coroutine. Forgetting `await` caused an attribute error when reading `stop_reason`.
-- **How discovered:** Runtime error during development.
-- **Code handling:** The stream final message is awaited before checking `stop_reason` and reading `tool_use` blocks.
+```text
+You: weather of null
+Assistant: The current weather in Nulles is:
+- Temperature: 22.3°C
+- Condition: Clear
+- Humidity: 57%
+```
 
-### Tool result content must be a string
+```text
+You: weather of None
+Assistant: The current weather in Nonette is:
+- Temperature: 16.9°C
+- Condition: Clear
+- Humidity: 67%
+```
 
-- **Behaviour:** Claude tool result content should be sent as string content, not a raw Python dict.
-- **How discovered:** Anthropic tool-use integration while wiring the second model call.
-- **Code handling:** Tool outputs are serialized with `json.dumps(result)` before being appended as `tool_result` content.
+```text
+You: weather of 12a
+Assistant: The current weather in Alexandria is:
+- Temperature: 23.3°C
+- Condition: Partly cloudy
+- Humidity: 83%
+```
 
-### Cancelled tool turns can corrupt conversation history
+The most surprising example was `12a`. It is not a location a user would normally expect to be valid, but the API resolved it to `Alexandria`.
 
-- **Behaviour:** If a research call is cancelled after the user message is added but before tool results are appended, the next turn can leave consecutive user messages or dangling tool-use state.
-- **How discovered:** Manual review of all conversation-history paths during cancellation hardening.
-- **Code handling:** Mid-tool cancellation pops the current user turn. Mid-second-stream cancellation rolls back the user input, assistant tool-use message, and user tool-results message.
+Equivalent direct API query:
+
+```bash
+curl -i \
+  -H "X-API-Key: $ELYOS_API_KEY" \
+  "https://elyos-interview-907656039105.europe-west2.run.app/weather?location=12a"
+```
+
+Observed response:
+
+```json
+{"location":"Alexandria","temperature_c":23.3,"condition":"Partly cloudy","humidity":83}
+```
+
+### How I discovered it
+
+I tested the CLI with unusual weather prompts after the normal happy path worked:
+
+- `weather of atlantis`
+- `weather of null`
+- `weather of None`
+- `weather of 12a`
+
+This showed that the LLM was correctly choosing the weather tool, and the API was doing its own location resolution behind the scenes.
+
+### How I handled it in code
+
+I chose not to add client-side location validation.
+
+Reasoning:
+
+- The API clearly has its own location resolution behaviour.
+- Local validation could incorrectly reject inputs the API can resolve.
+- The assignment asks for graceful API handling, not perfect location correctness.
+
+The code therefore:
+
+- Passes successful weather responses through to the LLM.
+- Parses JSON error responses when the API rejects a location.
+- Lets the assistant explain the location returned by the API.
+
+The trade-off is that the assistant may present a surprising resolved location, such as `12a` becoming `Alexandria`. With more time, I would make the assistant explicitly say something like: "The weather API resolved `12a` to Alexandria."
+
+## 3. Location-only prompts can be routed to weather
+
+### Behaviour
+
+If the conversation has recently been about weather, a short location-only message can be interpreted as the missing weather location.
+
+Example from the CLI:
+
+```text
+You: What is weather today?
+Assistant: I'd be happy to help you check the weather! However, I need to know which location you'd like the weather for.
+
+You: Goodmayes
+Assistant: Here's the weather for Goodmayes today:
+- Temperature: 21.3°C
+- Condition: Clear
+- Humidity: 73%
+```
+
+This is useful when the user is answering the assistant's follow-up question. However, it also creates an ambiguity: if a user simply types a place name like `London`, the model may call the weather tool and return London weather, even though the user might have meant something else, such as London events, travel information, or general research about London.
+
+### How I discovered it
+
+I tested a normal weather conversation where the assistant asked for a missing location, then I replied with only the location name. The app correctly continued the weather flow, but it showed the broader ambiguity around single-word location prompts.
+
+### How I handled it in code
+
+I left the behaviour to the LLM and conversation history rather than hard-coding a rule.
+
+Reasoning:
+
+- In a weather follow-up flow, `London` or `Goodmayes` probably should mean "use this as the weather location."
+- Outside that flow, `London` alone is ambiguous and could mean weather, events, travel, history, or research.
+- Hard-coding all bare place names as weather would be too aggressive.
+- Hard-coding all bare place names as research would break the natural follow-up weather case.
+
+The current implementation preserves conversation history and lets the model infer the user's intent from context.
+
+With more time, I would improve the system prompt/tool descriptions so that the assistant asks a clarifying question for ambiguous standalone locations unless the previous assistant message explicitly asked for a weather location. For example: "Do you want the weather in London, events in London, or general information about London?"
